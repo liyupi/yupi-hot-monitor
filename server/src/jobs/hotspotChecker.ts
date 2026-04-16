@@ -135,11 +135,13 @@ export async function runHotspotCheck(io: Server): Promise<void> {
         if (item.source !== 'twitter' && otherProcessed >= OTHER_QUOTA) continue;
         if (twitterProcessed + otherProcessed >= TWITTER_QUOTA + OTHER_QUOTA) break;
         try {
-          // 检查是否已存在
-          const existing = await prisma.hotspot.findFirst({
+          // 检查是否已存在（使用复合唯一键，比 findFirst 更高效）
+          const existing = await prisma.hotspot.findUnique({
             where: {
-              url: item.url,
-              source: item.source
+              url_source: {
+                url: item.url,
+                source: item.source
+              }
             }
           });
 
