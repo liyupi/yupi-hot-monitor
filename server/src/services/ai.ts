@@ -1,9 +1,78 @@
-import { OpenRouter } from '@openrouter/sdk';
+import 'dotenv/config';
 import type { AIAnalysis } from '../types.js';
 
-const openRouter = new OpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY ?? ''
-});
+type ChatMessage = {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+};
+
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
+};
+
+function getAIApiKey(): string {
+  return process.env.OPENAI_API_KEY || '';
+}
+
+function getAIBaseUrl(): string {
+  return (process.env.OPENAI_BASE_URL || 'https://api.siliconflow.cn/v1').replace(/\/+$/, '');
+}
+
+function getAIModel(): string {
+  return process.env.OPENAI_MODEL || 'Pro/zai-org/GLM-4.7';
+}
+
+function getAITimeoutMs(): number {
+  const raw = Number(process.env.OPENAI_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) {
+    return raw;
+  }
+  return 120000;
+}
+
+async function sendChatCompletion(messages: ChatMessage[], options: { temperature: number; maxTokens: number }): Promise<string> {
+  const apiKey = getAIApiKey();
+  const response = await fetch(`${getAIBaseUrl()}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: getAIModel(),
+      messages,
+      enable_thinking: false,
+      temperature: options.temperature,
+      max_tokens: options.maxTokens
+    }),
+    signal: AbortSignal.timeout(getAITimeoutMs())
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Chat completion failed: ${response.status} ${response.statusText} ${errorBody}`.trim());
+  }
+
+  const data = await response.json() as ChatCompletionResponse;
+  const content = data.choices?.[0]?.message?.content;
+
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map(item => item.text || '')
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  throw new Error('Missing assistant content in chat completion response');
+}
 
 // ========== Query Expansion（查询扩展） ==========
 
@@ -15,24 +84,21 @@ const openRouter = new OpenRouter({
 const expansionCache = new Map<string, string[]>();
 
 export async function expandKeyword(keyword: string): Promise<string[]> {
-  // 缓存命中
   if (expansionCache.has(keyword)) {
     return expansionCache.get(keyword)!;
   }
 
-  // 不管 AI 是否可用，先提取基础核心词
   const coreTerms = extractCoreTerms(keyword);
 
-  if (!process.env.OPENROUTER_API_KEY) {
+  if (!getAIApiKey()) {
     const result = [keyword, ...coreTerms];
     expansionCache.set(keyword, result);
     return result;
   }
 
   try {
-    const result = await openRouter.chat.send({
-      model: 'deepseek/deepseek-v3.2',
-      messages: [
+    const responseContent = await sendChatCompletion(
+      [
         {
           role: 'system',
           content: `你是一个搜索查询扩展专家。给定一个监控关键词，生成该关键词的变体和相关检索词，用于文本匹配。
@@ -53,16 +119,12 @@ export async function expandKeyword(keyword: string): Promise<string[]> {
           content: keyword
         }
       ],
-      temperature: 0.2,
-      maxTokens: 300
-    });
+      { temperature: 0.2, maxTokens: 300 }
+    );
 
-    const rawContent = result.choices[0]?.message?.content || '';
-    const responseContent = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
     const jsonMatch = responseContent.match(/\[[\s\S]*\]/);
     if (jsonMatch) {
       const parsed: string[] = JSON.parse(jsonMatch[0]);
-      // 确保原始关键词和核心词都在列表中
       const expanded = [...new Set([keyword, ...coreTerms, ...parsed.map(s => s.trim()).filter(Boolean)])];
       expansionCache.set(keyword, expanded);
       console.log(`  🔍 Query expansion for "${keyword}": ${expanded.length} variants`);
@@ -72,36 +134,25 @@ export async function expandKeyword(keyword: string): Promise<string[]> {
     console.error('Query expansion failed:', error);
   }
 
-  // Fallback：使用基础核心词
   const fallback = [keyword, ...coreTerms];
   expansionCache.set(keyword, fallback);
   return fallback;
 }
 
-/**
- * 从关键词中提取核心词（纯文本方式，不依赖 AI）
- */
 function extractCoreTerms(keyword: string): string[] {
   const terms: string[] = [];
-  // 按空格、连字符、下划线分割
   const parts = keyword.split(/[\s\-_\/\\·]+/).filter(p => p.length >= 2);
   if (parts.length > 1) {
     terms.push(...parts);
-    // 两两组合
     for (let i = 0; i < parts.length - 1; i++) {
       terms.push(parts[i] + ' ' + parts[i + 1]);
     }
   }
-  // 去重，排除原始关键词本身
   return [...new Set(terms)].filter(t => t.toLowerCase() !== keyword.toLowerCase());
 }
 
 // ========== 关键词预匹配 ==========
 
-/**
- * 检查文本中是否包含任一扩展关键词（不区分大小写）。
- * 返回是否匹配以及匹配到的词。
- */
 export function preMatchKeyword(text: string, expandedKeywords: string[]): { matched: boolean; matchedTerms: string[] } {
   const lowerText = text.toLowerCase();
   const matchedTerms: string[] = [];
@@ -116,8 +167,8 @@ export function preMatchKeyword(text: string, expandedKeywords: string[]): { mat
 // ========== AI 内容分析（关键词感知） ==========
 
 function buildAnalysisPrompt(keyword: string, preMatchResult: { matched: boolean; matchedTerms: string[] }): string {
-  const matchHint = preMatchResult.matched 
-    ? `\n注意：文本预匹配发现内容中包含以下关键词变体：${preMatchResult.matchedTerms.join('、')}` 
+  const matchHint = preMatchResult.matched
+    ? `\n注意：文本预匹配发现内容中包含以下关键词变体：${preMatchResult.matchedTerms.join('、')}`
     : `\n注意：文本预匹配发现内容中未直接提及关键词"${keyword}"的任何变体，请特别严格审核相关性。`;
 
   return `你是一个热点内容精准匹配专家。你的任务是判断一段内容是否与指定的监控关键词【${keyword}】直接相关。
@@ -149,11 +200,10 @@ ${matchHint}
 }
 
 export async function analyzeContent(content: string, keyword: string, preMatchResult?: { matched: boolean; matchedTerms: string[] }): Promise<AIAnalysis> {
-  // 默认预匹配结果
   const matchResult = preMatchResult ?? { matched: false, matchedTerms: [] };
 
-  if (!process.env.OPENROUTER_API_KEY) {
-    console.warn('OpenRouter API key not configured, using fallback analysis');
+  if (!getAIApiKey()) {
+    console.warn('AI API key not configured, using fallback analysis');
     return {
       isReal: true,
       relevance: matchResult.matched ? 50 : 20,
@@ -165,28 +215,20 @@ export async function analyzeContent(content: string, keyword: string, preMatchR
   }
 
   try {
-    const prompt = buildAnalysisPrompt(keyword, matchResult);
-
-    const result = await openRouter.chat.send({
-      model: 'deepseek/deepseek-v3.2',
-      messages: [
+    const responseContent = await sendChatCompletion(
+      [
         {
           role: 'system',
-          content: prompt
+          content: buildAnalysisPrompt(keyword, matchResult)
         },
         {
           role: 'user',
-          content: content.slice(0, 2000) // 限制内容长度
+          content: content.slice(0, 2000)
         }
       ],
-      temperature: 0.2, // 降低温度，提高判断一致性
-      maxTokens: 500
-    });
+      { temperature: 0.2, maxTokens: 500 }
+    );
 
-    const rawContent = result.choices[0]?.message?.content || '';
-    const responseContent = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
-    
-    // 尝试解析 JSON
     const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
@@ -195,8 +237,8 @@ export async function analyzeContent(content: string, keyword: string, preMatchR
         relevance: Math.min(100, Math.max(0, Number(parsed.relevance) || 0)),
         relevanceReason: String(parsed.relevanceReason || '').slice(0, 200),
         keywordMentioned: Boolean(parsed.keywordMentioned),
-        importance: ['low', 'medium', 'high', 'urgent'].includes(parsed.importance) 
-          ? parsed.importance 
+        importance: ['low', 'medium', 'high', 'urgent'].includes(parsed.importance)
+          ? parsed.importance
           : 'low',
         summary: String(parsed.summary || '').slice(0, 150)
       };
@@ -205,7 +247,6 @@ export async function analyzeContent(content: string, keyword: string, preMatchR
     throw new Error('Failed to parse AI response');
   } catch (error) {
     console.error('AI analysis failed:', error);
-    // Fallback
     return {
       isReal: true,
       relevance: matchResult.matched ? 30 : 10,
@@ -218,7 +259,6 @@ export async function analyzeContent(content: string, keyword: string, preMatchR
 }
 
 export async function batchAnalyze(contents: string[], keyword: string, expandedKeywords?: string[]): Promise<AIAnalysis[]> {
-  // 并行分析，但限制并发数
   const batchSize = 3;
   const results: AIAnalysis[] = [];
 
@@ -226,8 +266,8 @@ export async function batchAnalyze(contents: string[], keyword: string, expanded
     const batch = contents.slice(i, i + batchSize);
     const batchResults = await Promise.all(
       batch.map(content => {
-        const preMatch = expandedKeywords 
-          ? preMatchKeyword(content, expandedKeywords) 
+        const preMatch = expandedKeywords
+          ? preMatchKeyword(content, expandedKeywords)
           : undefined;
         return analyzeContent(content, keyword, preMatch);
       })
