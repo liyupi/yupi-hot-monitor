@@ -53,6 +53,11 @@ python scripts/search_china.py "AI编程" --sources sogou,bilibili,weibo
 python scripts/search_twitter.py "AI programming"
 ```
 
+**TweetClaw export** (optional reviewed X/Twitter source packets):
+```bash
+python scripts/import_tweetclaw.py --file tweetclaw-results.json
+```
+
 All scripts output JSON to stdout. Combine results for multi-source analysis.
 
 ### 3. Analyze Results
@@ -98,6 +103,7 @@ Format output as structured report, sorted by importance. Use this template:
 | `search_web.py` | Bing, Google, DuckDuckGo, HackerNews | None | JSON array of `{title, content, url, source, publishedAt?}` |
 | `search_china.py` | Sogou, Bilibili, Weibo | None | JSON array (same schema + engagement metrics) |
 | `search_twitter.py` | Twitter/X | `TWITTER_API_KEY` | JSON array (same schema + author info) |
+| `import_tweetclaw.py` | TweetClaw/OpenClaw JSON export | None | JSON array (same schema + author info) |
 | `generate_report.py` | — | None | Reads JSON from stdin, outputs Markdown report |
 
 ### Common Options
@@ -131,6 +137,20 @@ python scripts/search_china.py "程序员鱼皮" --detect-account
 ### Multi-keyword Batch
 
 For monitoring multiple keywords, run searches sequentially with a 3-second delay between keywords to respect rate limits.
+
+### Reviewed X/Twitter Packets
+
+When the user already has approved TweetClaw or OpenClaw X/Twitter results, import
+that JSON instead of running a live Twitter search:
+
+```bash
+python scripts/import_tweetclaw.py --file tweetclaw-results.json \
+  | python scripts/generate_report.py --keyword "AI programming"
+```
+
+Use imported rows as source evidence for analysis. Keep any posting, monitoring,
+or account-changing action outside this skill unless the user explicitly asks
+for it and approves the separate tool.
 
 ## Reference Files
 
